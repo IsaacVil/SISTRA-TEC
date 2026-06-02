@@ -43,15 +43,44 @@ interface DonacionContextType {
   clasificarDonacion: (id: string, estadoArticulo: EstadoArticulo, responsable: string) => void;
 }
 
+const STORAGE_KEY = 'sistra-donaciones';
+const SYNC_EVENT = 'sistra-donaciones-updated';
+
 const DonacionContext = createContext<DonacionContextType | undefined>(undefined);
+
+const loadDonacionesFromStorage = (): Donacion[] | null => {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) return null;
+  try {
+    return JSON.parse(saved) as Donacion[];
+  } catch {
+    return null;
+  }
+};
+
+const generarNuevoId = (donaciones: Donacion[]): string => {
+  const maxNum = donaciones.reduce((max, d) => {
+    const match = d.id.match(/DON-(\d+)/i);
+    return match ? Math.max(max, parseInt(match[1], 10)) : max;
+  }, 0);
+  return `DON-${String(maxNum + 1).padStart(3, '0')}`;
+};
 
 export const DonacionProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [donaciones, setDonaciones] = useState<Donacion[]>([]);
 
+  const persistDonaciones = (nuevasDonaciones: Donacion[]) => {
+    setDonaciones(nuevasDonaciones);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(nuevasDonaciones));
+    window.dispatchEvent(
+      new CustomEvent(SYNC_EVENT, { detail: nuevasDonaciones })
+    );
+  };
+
   useEffect(() => {
-    const savedDonaciones = localStorage.getItem('sistra-donaciones');
+    const savedDonaciones = loadDonacionesFromStorage();
     if (savedDonaciones) {
-      setDonaciones(JSON.parse(savedDonaciones));
+      setDonaciones(savedDonaciones);
     } else {
       // Datos de ejemplo
       const ejemploDonaciones: Donacion[] = [
@@ -170,13 +199,44 @@ export const DonacionProvider: React.FC<{ children: ReactNode }> = ({ children }
           ],
         },
       ];
-      setDonaciones(ejemploDonaciones);
-      localStorage.setItem('sistra-donaciones', JSON.stringify(ejemploDonaciones));
+      persistDonaciones(ejemploDonaciones);
     }
+
+    const syncFromStorage = () => {
+      const stored = loadDonacionesFromStorage();
+      if (stored) setDonaciones(stored);
+    };
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY) syncFromStorage();
+    };
+
+    const onCustomSync = (e: Event) => {
+      const custom = e as CustomEvent<Donacion[]>;
+      if (custom.detail) setDonaciones(custom.detail);
+      else syncFromStorage();
+    };
+
+    const onFocus = () => syncFromStorage();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') syncFromStorage();
+    };
+
+    window.addEventListener('storage', onStorage);
+    window.addEventListener(SYNC_EVENT, onCustomSync);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener(SYNC_EVENT, onCustomSync);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, []);
 
   const crearDonacion = (donacion: Omit<Donacion, 'id' | 'fechaCreacion' | 'estadoActual' | 'trazabilidad'>): Donacion => {
-    const nuevoId = `DON-${String(donaciones.length + 1).padStart(3, '0')}`;
+    const stored = loadDonacionesFromStorage() ?? donaciones;
+    const nuevoId = generarNuevoId(stored);
     const fechaCreacion = new Date().toISOString();
 
     const nuevaDonacion: Donacion = {
@@ -196,15 +256,15 @@ export const DonacionProvider: React.FC<{ children: ReactNode }> = ({ children }
       ],
     };
 
-    const nuevasDonaciones = [...donaciones, nuevaDonacion];
-    setDonaciones(nuevasDonaciones);
-    localStorage.setItem('sistra-donaciones', JSON.stringify(nuevasDonaciones));
+    const nuevasDonaciones = [...stored, nuevaDonacion];
+    persistDonaciones(nuevasDonaciones);
 
     return nuevaDonacion;
   };
 
   const buscarDonacion = (id: string): Donacion | undefined => {
-    return donaciones.find(d => d.id.toLowerCase() === id.toLowerCase());
+    const actuales = loadDonacionesFromStorage() ?? donaciones;
+    return actuales.find(d => d.id.toLowerCase() === id.toLowerCase());
   };
 
   const actualizarEstadoDonacion = (
@@ -214,10 +274,11 @@ export const DonacionProvider: React.FC<{ children: ReactNode }> = ({ children }
     responsable: string,
     imagenEntrega?: string
   ) => {
-    const donacionIndex = donaciones.findIndex(d => d.id === id);
+    const actuales = loadDonacionesFromStorage() ?? donaciones;
+    const donacionIndex = actuales.findIndex(d => d.id === id);
     if (donacionIndex === -1) return;
 
-    const donacionActualizada = { ...donaciones[donacionIndex] };
+    const donacionActualizada = { ...actuales[donacionIndex] };
     donacionActualizada.estadoActual = nuevoEstado;
 
     const nuevoEvento: EventoTrazabilidad = {
@@ -231,18 +292,18 @@ export const DonacionProvider: React.FC<{ children: ReactNode }> = ({ children }
 
     donacionActualizada.trazabilidad.push(nuevoEvento);
 
-    const nuevasDonaciones = [...donaciones];
+    const nuevasDonaciones = [...actuales];
     nuevasDonaciones[donacionIndex] = donacionActualizada;
 
-    setDonaciones(nuevasDonaciones);
-    localStorage.setItem('sistra-donaciones', JSON.stringify(nuevasDonaciones));
+    persistDonaciones(nuevasDonaciones);
   };
 
   const clasificarDonacion = (id: string, estadoArticulo: EstadoArticulo, responsable: string) => {
-    const donacionIndex = donaciones.findIndex(d => d.id === id);
+    const actuales = loadDonacionesFromStorage() ?? donaciones;
+    const donacionIndex = actuales.findIndex(d => d.id === id);
     if (donacionIndex === -1) return;
 
-    const donacionActualizada = { ...donaciones[donacionIndex] };
+    const donacionActualizada = { ...actuales[donacionIndex] };
     donacionActualizada.estadoArticulo = estadoArticulo;
     donacionActualizada.estadoActual = 'clasificado';
 
@@ -256,11 +317,10 @@ export const DonacionProvider: React.FC<{ children: ReactNode }> = ({ children }
 
     donacionActualizada.trazabilidad.push(nuevoEvento);
 
-    const nuevasDonaciones = [...donaciones];
+    const nuevasDonaciones = [...actuales];
     nuevasDonaciones[donacionIndex] = donacionActualizada;
 
-    setDonaciones(nuevasDonaciones);
-    localStorage.setItem('sistra-donaciones', JSON.stringify(nuevasDonaciones));
+    persistDonaciones(nuevasDonaciones);
   };
 
   return (
